@@ -2,6 +2,7 @@ using System.Globalization;
 using OrderEngine.Contract;
 using OrderEngine.Discounts;
 using OrderEngine.Discounts.Coupons;
+using OrderEngine.Shipping;
 using OrderEngine.Validation;
 using OrderEngine.Vendor.Wallet;
 
@@ -11,16 +12,18 @@ namespace OrderEngine.Service;
 public class OrderService : IOrderService
 {
     private readonly ExternalSystems _ext;
+    private readonly IShippingCostCalculator _shippingCostCalculator;
     private readonly IOrderServiceValidation _validation;
     private readonly CouponFactory _coupons;
     private readonly DiscountCalculator _discounts;
     private readonly Dictionary<string, OrderRecord> _orders = new Dictionary<string, OrderRecord>();
 
     public OrderService(ExternalSystems ext, IOrderServiceValidation validation,
-        CouponFactory coupons, DiscountCalculator discounts)
+        IShippingCostCalculator shippingCostCalculator, CouponFactory coupons, DiscountCalculator discounts)
     {
         _ext = ext;
         _validation = validation;
+        _shippingCostCalculator = shippingCostCalculator;
         _coupons = coupons;
         _discounts = discounts;
     }
@@ -53,41 +56,11 @@ public class OrderService : IOrderService
         var netGoods = subtotal - discount;
 
         // ---------------- shipping ----------------
-        decimal shipping = 0;
-        var billableKg = (int)Math.Ceiling(totalWeight);
-        if (request.Shipping == ShippingMethod.Pickup)
-        {
-            shipping = 0;
-        }
-        else if (country == "EG")
-        {
-            if (request.Shipping == ShippingMethod.Standard)
-            {
-                if (netGoods >= 2000)
-                    shipping = 0;
-                else
-                    shipping = 50 + 5 * Math.Max(0, billableKg - 5);
-            }
-            else if (request.Shipping == ShippingMethod.Express)
-            {
-                shipping = 120 + 10 * Math.Max(0, billableKg - 5);
-            }
-        }
-        else
-        {
-            // international (SA, AE)
-            if (request.Shipping == ShippingMethod.Standard)
-            {
-                shipping = 300 + 25 * billableKg;
-            }
-            else if (request.Shipping == ShippingMethod.Express)
-            {
-                shipping = Math.Round((300 + 25 * billableKg) * 1.5m, 2, MidpointRounding.AwayFromZero);
-            }
-        }
+        // shipping is based on country, method, weight, and coupon
 
-        if (coupon is { FreeStandardShipping: true } && request.Shipping == ShippingMethod.Standard)
-            shipping = 0;
+        var billableKg = (int) Math.Ceiling(totalWeight);
+        var shippingMethod = request.Shipping;
+        var shipping = _shippingCostCalculator.CalculateShippingCost(country, shippingMethod, billableKg, coupon, netGoods);
 
         // ---------------- tax ----------------
         decimal taxRate;

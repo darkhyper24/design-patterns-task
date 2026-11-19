@@ -2,6 +2,7 @@ using OrderEngine.Contract;
 using OrderEngine.Discounts;
 using OrderEngine.Discounts.Coupons;
 using OrderEngine.Service;
+using OrderEngine.Shipping;
 using OrderEngine.Validation;
 
 namespace OrderEngine.Composition;
@@ -20,6 +21,7 @@ public static class Bootstrap
         var coupons = new CouponFactory();
         var discounts = new DiscountCalculator(GlobalSettings.Instance.MaxDiscountPercent);
 
-        return new OrderService(externals, new OrederServiceValidation(externals, coupons), coupons, discounts);
+        return new OrderService(externals, new OrederServiceValidation(externals, coupons),
+            new ShippingCostCalculator(), coupons, discounts);
     }
 }
