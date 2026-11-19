@@ -1,59 +1,35 @@
 using System.Globalization;
 using OrderEngine.Contract;
+using OrderEngine.Validation;
 using OrderEngine.Vendor.Wallet;
 
-namespace OrderEngine;
+namespace OrderEngine.Service;
 
 // TODO: split this up one day (written 2019, last touched by "temp" fix in 2024)
 public class OrderService : IOrderService
 {
     private readonly ExternalSystems _ext;
+    private readonly IOrderServiceValidation _validation;
     private readonly Dictionary<string, OrderRecord> _orders = new Dictionary<string, OrderRecord>();
 
-    public OrderService(ExternalSystems ext)
+    public OrderService(ExternalSystems ext, IOrderServiceValidation validation)
     {
         _ext = ext;
+        _validation = validation;
     }
 
     public OrderReceipt PlaceOrder(PlaceOrderRequest request)
     {
-        // ---------------- validation ----------------
-        if (request == null) throw new ArgumentNullException(nameof(request));
-        if (request.Customer == null) throw new OrderValidationException("Customer is required");
-        if (request.Lines == null || request.Lines.Count == 0) throw new OrderValidationException("Cart is empty");
-
+        _validation.Validate(request);
         var products = new List<Product>();
         foreach (var line in request.Lines)
-        {
-            if (line.Quantity < 1 || line.Quantity > 100)
-                throw new OrderValidationException("Invalid quantity for " + line.Sku);
-            var p = _ext.Catalog.Find(line.Sku);
-            if (p == null)
-                throw new OrderValidationException("Unknown product " + line.Sku);
-            products.Add(p);
-        }
-
+            products.Add(_ext.Catalog.Find(line.Sku)!);
+        
+        
+        var pm = request.PaymentMethod.ToLower();
         var country = request.Customer.Country;
-        if (country != "EG" && country != "SA" && country != "AE")
-            throw new OrderValidationException("We do not ship to " + country);
-
-        var pm = (request.PaymentMethod ?? "").ToLower();
-        if (pm != "card" && pm != "wallet" && pm != "bank" && pm != "cod")
-            throw new OrderValidationException("Unsupported payment method " + request.PaymentMethod);
-
-        if (pm == "wallet" && country != "EG")
-            throw new OrderValidationException("Wallet payments are only available in Egypt");
-        if (pm == "cod" && country != "EG")
-            throw new OrderValidationException("Cash on delivery is only available in Egypt");
-        if (request.Shipping == ShippingMethod.Pickup && country != "EG")
-            throw new OrderValidationException("Pickup is only available in Egypt");
-
         var coupon = request.CouponCode == null ? null : request.CouponCode.Trim().ToUpper();
-        if (coupon == "") coupon = null;
-        if (coupon != null && coupon != "WELCOME10" && coupon != "FLAT100" && coupon != "FREESHIP")
-            throw new OrderValidationException("Unknown coupon " + request.CouponCode);
-        if (coupon == "WELCOME10" && request.Customer.Tier != CustomerTier.Regular)
-            throw new OrderValidationException("WELCOME10 is for new customers only");
+
 
         // ---------------- subtotal ----------------
         decimal subtotal = 0;
