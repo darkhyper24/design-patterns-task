@@ -1,14 +1,17 @@
 ﻿using OrderEngine.Contract;
+using OrderEngine.Discounts.Coupons;
 
 namespace OrderEngine.Validation
 {
     public class OrederServiceValidation : IOrderServiceValidation
     {
         private readonly ExternalSystems _externalSystems;
+        private readonly CouponFactory _coupons;
 
-        public OrederServiceValidation(ExternalSystems externalSystems)
+        public OrederServiceValidation(ExternalSystems externalSystems, CouponFactory coupons)
         {
             _externalSystems = externalSystems;
+            _coupons = coupons;
         }
         public void Validate(PlaceOrderRequest orderRequest)
         {
@@ -76,14 +79,7 @@ namespace OrderEngine.Validation
 
         private void ValidateCouponCode(PlaceOrderRequest orderRequest)
         {
-            var coupon = orderRequest.CouponCode == null ? null : orderRequest.CouponCode.Trim().ToUpper();
-            var tier = orderRequest.Customer?.Tier;
-            if (coupon == "") coupon = null;
-            if (coupon != null && coupon != "WELCOME10" && coupon != "FLAT100" && coupon != "FREESHIP")
-                throw new OrderValidationException("Unknown coupon " + orderRequest.CouponCode);
-            if (coupon == "WELCOME10" && tier != CustomerTier.Regular)
-                throw new OrderValidationException("WELCOME10 is for new customers only");
-
+            _coupons.Create(orderRequest.CouponCode)?.CheckEligibility(orderRequest.Customer);
         }
     }
 }

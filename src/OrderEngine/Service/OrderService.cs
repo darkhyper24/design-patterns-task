@@ -1,5 +1,7 @@
 using System.Globalization;
 using OrderEngine.Contract;
+using OrderEngine.Discounts;
+using OrderEngine.Discounts.Coupons;
 using OrderEngine.Shipping;
 using OrderEngine.Validation;
 using OrderEngine.Vendor.Wallet;
@@ -12,13 +14,18 @@ public class OrderService : IOrderService
     private readonly ExternalSystems _ext;
     private readonly IShippingCostCalculator _shippingCostCalculator;
     private readonly IOrderServiceValidation _validation;
+    private readonly CouponFactory _coupons;
+    private readonly DiscountCalculator _discounts;
     private readonly Dictionary<string, OrderRecord> _orders = new Dictionary<string, OrderRecord>();
 
-    public OrderService(ExternalSystems ext, IOrderServiceValidation validation, IShippingCostCalculator shippingCostCalculator)
+    public OrderService(ExternalSystems ext, IOrderServiceValidation validation,
+        IShippingCostCalculator shippingCostCalculator, CouponFactory coupons, DiscountCalculator discounts)
     {
         _ext = ext;
         _validation = validation;
         _shippingCostCalculator = shippingCostCalculator;
+        _coupons = coupons;
+        _discounts = discounts;
     }
 
     public OrderReceipt PlaceOrder(PlaceOrderRequest request)
@@ -31,7 +38,7 @@ public class OrderService : IOrderService
         
         var pm = request.PaymentMethod.ToLower();
         var country = request.Customer.Country;
-        var coupon = request.CouponCode == null ? null : request.CouponCode.Trim().ToUpper();
+        var coupon = _coupons.Create(request.CouponCode);
 
 
         // ---------------- subtotal ----------------
@@ -44,36 +51,7 @@ public class OrderService : IOrderService
         }
 
         // ---------------- discounts ----------------
-        decimal tierDiscount = 0;
-        if (request.Customer.Tier == CustomerTier.Gold)
-            tierDiscount = Math.Round(subtotal * 0.05m, 2, MidpointRounding.AwayFromZero);
-        else if (request.Customer.Tier == CustomerTier.Platinum)
-            tierDiscount = Math.Round(subtotal * 0.10m, 2, MidpointRounding.AwayFromZero);
-
-        decimal bulkDiscount = 0;
-        for (int i = 0; i < request.Lines.Count; i++)
-        {
-            if (request.Lines[i].Quantity >= 10)
-            {
-                var lineTotal = products[i].UnitPrice * request.Lines[i].Quantity;
-                bulkDiscount += Math.Round(lineTotal * 0.05m, 2, MidpointRounding.AwayFromZero);
-            }
-        }
-
-        decimal couponDiscount = 0;
-        if (coupon == "WELCOME10")
-        {
-            couponDiscount = Math.Round(subtotal * 0.10m, 2, MidpointRounding.AwayFromZero);
-        }
-        else if (coupon == "FLAT100")
-        {
-            if (subtotal >= 1000) couponDiscount = 100;
-        }
-        // FREESHIP is handled in shipping below
-
-        decimal discount = tierDiscount + bulkDiscount + couponDiscount;
-        var maxDiscount = Math.Round(subtotal * GlobalSettings.Instance.MaxDiscountPercent, 2, MidpointRounding.AwayFromZero);
-        if (discount > maxDiscount) discount = maxDiscount;
+        var discount = _discounts.Calculate(request.Customer, request.Lines, products, subtotal, coupon);
 
         var netGoods = subtotal - discount;
 
@@ -82,7 +60,7 @@ public class OrderService : IOrderService
 
         var billableKg = (int) Math.Ceiling(totalWeight);
         var shippingMethod = request.Shipping;
-        var shipping = _shippingCostCalculator.CalculateShippingCost(country, shippingMethod, billableKg, coupon!, netGoods);
+        var shipping = _shippingCostCalculator.CalculateShippingCost(country, shippingMethod, billableKg, coupon, netGoods);
 
         // ---------------- tax ----------------
         decimal taxRate;
