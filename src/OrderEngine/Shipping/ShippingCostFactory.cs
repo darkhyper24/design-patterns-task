@@ -14,19 +14,19 @@ namespace OrderEngine.Shipping
             {
                 return new PickupShippingStrategy();
             }
-            else if (country == "Egypt" && shippingMethod == ShippingMethod.Express)
+            else if (country == "EG" && shippingMethod == ShippingMethod.Express)
             {
                 return new EgyptExpressShippingStrategy();
             }
-            else if (country == "Egypt" && shippingMethod == ShippingMethod.Standard)
+            else if (country == "EG" && shippingMethod == ShippingMethod.Standard)
             {
                 return new EgyptStandardShippingStrategy();
             }
-            else if (country != "Egypt" && shippingMethod == ShippingMethod.Standard)
+            else if (country != "EG" && shippingMethod == ShippingMethod.Standard)
             {
                 return new InternationalStandardShippingStrategy();
             }
-            else if (country != "Egypt" && shippingMethod == ShippingMethod.Express)
+            else if (country != "EG" && shippingMethod == ShippingMethod.Express)
             {
                 return new InternationalExpressShippingStrategy();
             }

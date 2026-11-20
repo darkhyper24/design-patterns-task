@@ -3,7 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 
-namespace OrderEngine.Shipping
+namespace OrderEngine.Shipping.Strategy
 {
     public interface IShippingCostStrategy
     {
