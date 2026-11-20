@@ -2,9 +2,9 @@ using System.Globalization;
 using OrderEngine.Contract;
 using OrderEngine.Discounts;
 using OrderEngine.Discounts.Coupons;
+using OrderEngine.Payment;
 using OrderEngine.Shipping;
 using OrderEngine.Validation;
-using OrderEngine.Vendor.Wallet;
 
 namespace OrderEngine.Service;
 
@@ -14,18 +14,21 @@ public class OrderService : IOrderService
     private readonly ExternalSystems _ext;
     private readonly IShippingCostCalculator _shippingCostCalculator;
     private readonly IOrderServiceValidation _validation;
+    private readonly PaymentMethodFactory _payments;
     private readonly CouponFactory _coupons;
     private readonly DiscountCalculator _discounts;
     private readonly Dictionary<string, OrderRecord> _orders = new Dictionary<string, OrderRecord>();
 
     public OrderService(ExternalSystems ext, IOrderServiceValidation validation,
-        IShippingCostCalculator shippingCostCalculator, CouponFactory coupons, DiscountCalculator discounts)
+        IShippingCostCalculator shippingCostCalculator, CouponFactory coupons, DiscountCalculator discounts,
+        PaymentMethodFactory payments)
     {
         _ext = ext;
         _validation = validation;
         _shippingCostCalculator = shippingCostCalculator;
         _coupons = coupons;
         _discounts = discounts;
+        _payments = payments;
     }
 
     public OrderReceipt PlaceOrder(PlaceOrderRequest request)
@@ -52,12 +55,9 @@ public class OrderService : IOrderService
 
         // ---------------- discounts ----------------
         var discount = _discounts.Calculate(request.Customer, request.Lines, products, subtotal, coupon);
-
         var netGoods = subtotal - discount;
 
         // ---------------- shipping ----------------
-        // shipping is based on country, method, weight, and coupon
-
         var billableKg = (int) Math.Ceiling(totalWeight);
         var shippingMethod = request.Shipping;
         var shipping = _shippingCostCalculator.CalculateShippingCost(country, shippingMethod, billableKg, coupon, netGoods);
@@ -76,23 +76,8 @@ public class OrderService : IOrderService
         var beforeFee = netGoods + shipping + tax;
 
         // ---------------- payment fee ----------------
-        decimal fee = 0;
-        switch (pm)
-        {
-            case "card":
-                fee = Math.Round(beforeFee * GlobalSettings.Instance.CardFeePercent + GlobalSettings.Instance.CardFeeFixed, 2, MidpointRounding.AwayFromZero);
-                break;
-            case "wallet":
-                fee = Math.Round(beforeFee * GlobalSettings.Instance.WalletFeePercent, 2, MidpointRounding.AwayFromZero);
-                break;
-            case "bank":
-                fee = GlobalSettings.Instance.BankFeeFixed;
-                break;
-            case "cod":
-                fee = GlobalSettings.Instance.CodFeeFixed;
-                break;
-        }
-
+        var payment = _payments.Create(pm);
+        var fee = payment.CalculateFee(beforeFee);
         var total = beforeFee + fee;
 
         if (pm == "cod" && total > GlobalSettings.Instance.CodMaxOrderTotal)
@@ -100,59 +85,8 @@ public class OrderService : IOrderService
 
         // ---------------- payment ----------------
         var orderId = OrderIdGenerator.Next();
-        string paymentRef;
-        string status;
-
-        if (pm == "card")
-        {
-            var result = _ext.CardPay.Charge(request.PaymentToken, (long)(total * 100), GlobalSettings.Instance.Currency);
-            if (!result.Approved)
-            {
-                _ext.Audit.Record(new AuditEntry(_ext.Clock.UtcNow, "PaymentDeclined", orderId, result.DeclineCode ?? "UNKNOWN"));
-                throw new PaymentDeclinedException(result.DeclineCode ?? "UNKNOWN");
-            }
-            paymentRef = result.ChargeId!;
-            status = "PAID";
-        }
-        else if (pm == "wallet")
-        {
-            var req = new WalletDebitRequest();
-            req.MobileNumber = request.PaymentToken;
-            req.Amount = total;
-            req.MerchantReference = orderId;
-            var resp = _ext.Wallet.Debit(req);
-            if (resp.Status != "SUCCESS")
-            {
-                _ext.Audit.Record(new AuditEntry(_ext.Clock.UtcNow, "PaymentDeclined", orderId, resp.Status));
-                throw new PaymentDeclinedException(resp.Status);
-            }
-            paymentRef = resp.TransactionRef!;
-            status = "PAID";
-        }
-        else if (pm == "bank")
-        {
-            var xml = "<payment>"
-                      + "<account>" + request.PaymentToken + "</account>"
-                      + "<amount>" + total.ToString("0.00", CultureInfo.InvariantCulture) + "</amount>"
-                      + "<currency>818</currency>"
-                      + "<ref>" + orderId + "</ref>"
-                      + "</payment>";
-            string confirmation;
-            var code = _ext.LegacyBank.SubmitPayment(xml, out confirmation);
-            if (code != 0)
-            {
-                _ext.Audit.Record(new AuditEntry(_ext.Clock.UtcNow, "PaymentDeclined", orderId, "BANK_" + code));
-                throw new PaymentDeclinedException("BANK_" + code);
-            }
-            paymentRef = confirmation;
-            status = "PAID";
-        }
-        else
-        {
-            // cod: customer pays the courier
-            paymentRef = "COD";
-            status = "PENDING";
-        }
+        var paymentRef = payment.Pay(request.PaymentToken, total, orderId);
+        var status = pm == "cod" ? "PENDING" : "PAID";
 
         // ---------------- save ----------------
         var record = new OrderRecord();
@@ -233,21 +167,7 @@ public class OrderService : IOrderService
         else if (order.Status == "PAID")
         {
             // refund through whoever took the money
-            if (order.PaymentMethod == "card")
-            {
-                var ok = _ext.CardPay.Refund(order.PaymentReference, (long)(order.Total * 100));
-                if (!ok) throw new InvalidOperationException("Card refund failed for " + orderId);
-            }
-            else if (order.PaymentMethod == "wallet")
-            {
-                var resp = _ext.Wallet.Reverse(order.PaymentReference);
-                if (resp.Status != "SUCCESS") throw new InvalidOperationException("Wallet reversal failed for " + orderId);
-            }
-            else if (order.PaymentMethod == "bank")
-            {
-                var code = _ext.LegacyBank.ReversePayment(order.PaymentReference, "R01"); // R01 = customer cancellation
-                if (code != 0) throw new InvalidOperationException("Bank reversal failed for " + orderId + " code " + code);
-            }
+            _payments.Create(order.PaymentMethod).Refund(order.PaymentReference, order.Total, orderId);
 
             order.Status = "REFUNDED";
             _ext.Audit.Record(new AuditEntry(_ext.Clock.UtcNow, "OrderCancelled", orderId, reason));
